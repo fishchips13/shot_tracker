@@ -4,9 +4,7 @@ import SwiftData
 enum WorkoutFlowStep: Hashable {
     case home
     case chooseZones
-    case chooseFirstDrill(sessionID: UUID)
-    case activeDrill(drillID: UUID)
-    case drillSummary(drillID: UUID)
+    case activeDrill(drillID: UUID, previousDrillID: UUID?)
     case workoutSummary(sessionID: UUID)
 }
 
@@ -14,6 +12,7 @@ struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \ShootingSession.startedAt, order: .reverse) private var sessions: [ShootingSession]
     @State private var path: [WorkoutFlowStep] = []
+    @State private var didRouteInitialWorkout = false
     @State private var showDelete = false
     @State private var showFinishWorkout = false
     @State private var finishingSessionID: UUID?
@@ -22,16 +21,28 @@ struct ContentView: View {
         sessions.first(where: { $0.status != .completed && $0.endedAt == nil })
     }
 
+    private var completedSessions: [ShootingSession] {
+        sessions.filter { $0.status == .completed || $0.endedAt != nil }
+    }
+
     var body: some View {
         TabView {
             NavigationStack(path: $path) {
-                home.navigationDestination(for: WorkoutFlowStep.self, destination: destination)
+                dashboard
+                    .navigationDestination(for: WorkoutFlowStep.self, destination: destination)
             }
             .tabItem { Label("Track", systemImage: "basketball.fill") }
-            NavigationStack { HistoryView() }.tabItem { Label("History", systemImage: "clock.arrow.circlepath") }
-            NavigationStack { ZoneStatsView() }.tabItem { Label("Stats", systemImage: "chart.bar") }
+
+            NavigationStack { HistoryView() }
+                .tabItem { Label("History", systemImage: "clock.arrow.circlepath") }
+
+            NavigationStack { ZoneStatsView() }
+                .tabItem { Label("Stats", systemImage: "chart.bar") }
         }
         .tint(.orange)
+        .task {
+            routeInitialWorkoutIfNeeded()
+        }
         .alert("Delete unfinished workout?", isPresented: $showDelete) {
             Button("Cancel", role: .cancel) { }
             Button("Delete Workout", role: .destructive) { deleteUnfinishedWorkout() }
@@ -39,101 +50,143 @@ struct ContentView: View {
             Text("This will remove the workout and its recorded shots.")
         }
         .confirmationDialog("Finish workout?", isPresented: $showFinishWorkout, titleVisibility: .visible) {
-            Button("Keep Workout Going", role: .cancel) { }
+            Button("Keep Shooting", role: .cancel) { }
             Button("Finish Workout", role: .destructive) { finishWorkout() }
         } message: {
             if let session = session(for: finishingSessionID) {
-                Text("\(session.makes) makes on \(session.attempts) attempts, \(String(format: "%.0f%%", session.percentage)), across \(session.drills.count) drills.")
+                Text("\(session.makes) makes on \(session.attempts) attempts, \(String(format: "%.0f%%", session.percentage)).")
             }
         }
     }
 
-    private var home: some View {
-        VStack(spacing: 20) {
-            Spacer()
-            Image(systemName: "basketball.fill").font(.system(size: 76)).foregroundStyle(.orange)
-            Text("Shot Tracker").font(.largeTitle.bold())
-            Text("Train with focused drills. Every shot stays locked to its court zone.")
-                .multilineTextAlignment(.center).foregroundStyle(.secondary).padding(.horizontal)
-            Button(unfinishedSession == nil ? "Start Workout" : "Resume Workout") { resumeOrStart() }
-                .buttonStyle(.borderedProminent).controlSize(.large)
-            Spacer()
+    private var dashboard: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Ready to work?").font(.largeTitle.bold())
+                if let latest = completedSessions.first {
+                    dashboardCard(latest)
+                } else {
+                    Text("Log your first workout and build your shot chart.")
+                        .foregroundStyle(.secondary)
+                }
+
+                Button {
+                    path.append(.chooseZones)
+                } label: {
+                    Label("Start Shooting", systemImage: "play.fill")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+
+                if !completedSessions.isEmpty {
+                    Text("Latest session").font(.headline)
+                    Text("\(completedSessions.first?.makes ?? 0)/\(completedSessions.first?.attempts ?? 0) • \(String(format: "%.0f%%", completedSessions.first?.percentage ?? 0))")
+                        .font(.title3.bold().monospacedDigit())
+                }
+            }
+            .padding()
         }
-        .padding().background(Color.orange.opacity(0.035))
+        .background(Color.orange.opacity(0.035))
         .navigationTitle("Track")
         .toolbar {
             if unfinishedSession != nil {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button("End and Delete Workout", role: .destructive) { showDelete = true }
-                    } label: { Image(systemName: "ellipsis.circle") }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
                 }
             }
         }
     }
 
+    private func dashboardCard(_ session: ShootingSession) -> some View {
+        HStack(spacing: 0) {
+            dashboardStat("\(session.makes)", "MAKES")
+            dashboardStat("\(session.attempts)", "ATTEMPTS")
+            dashboardStat(String(format: "%.0f%%", session.percentage), "FG%")
+        }
+        .padding(.vertical, 16)
+        .background(LinearGradient(colors: [.orange, .orange.opacity(0.65)], startPoint: .topLeading, endPoint: .bottomTrailing))
+        .foregroundStyle(.white)
+        .clipShape(RoundedRectangle(cornerRadius: 22))
+    }
+
+    private func dashboardStat(_ value: String, _ label: String) -> some View {
+        VStack(spacing: 3) {
+            Text(value).font(.title3.bold().monospacedDigit())
+            Text(label).font(.caption2.bold()).opacity(0.85)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
     @ViewBuilder
     private func destination(for step: WorkoutFlowStep) -> some View {
         switch step {
-        case .home: EmptyView()
+        case .home:
+            EmptyView()
         case .chooseZones:
-            ZoneSelectionView { session in path.append(.chooseFirstDrill(sessionID: session.id)) }
-        case .chooseFirstDrill(let id):
-            if let session = session(for: id) {
-                DrillStartView(session: session) { drill in path.append(.activeDrill(drillID: drill.id)) }
-            } else { unavailable("Workout") }
-        case .activeDrill(let id):
+            ZoneSelectionView { drill in
+                path.append(.activeDrill(drillID: drill.id, previousDrillID: nil))
+            }
+        case .activeDrill(let id, let previousID):
             if let drill = drill(for: id) {
-                ActiveDrillView(drill: drill, onFinish: { path.append(.drillSummary(drillID: drill.id)) }, onEndWorkout: {
-                    finishingSessionID = drill.session?.id
-                    showFinishWorkout = true
-                }, onSwitchToDrill: { target in
-                    path.append(.activeDrill(drillID: target.id))
-                })
-            } else { unavailable("Drill") }
-        case .drillSummary(let id):
-            if let drill = drill(for: id) {
-                DrillSummaryView(drill: drill, onSwitchToZone: { zoneID in
-                    startDrill(in: drill.session, zoneID: zoneID)
-                }, onAnother: {
-                    if let session = drill.session { path.append(.chooseFirstDrill(sessionID: session.id)) }
-                }, onFinishWorkout: {
-                    finishingSessionID = drill.session?.id
-                    showFinishWorkout = true
-                })
-            } else { unavailable("Drill") }
+                ActiveDrillView(
+                    drill: drill,
+                    previousDrill: previousID.flatMap(drill(for:)),
+                    onSwitchToDrill: { target, previous in
+                        replaceActiveRoute(with: target, previousDrill: previous)
+                    },
+                    onEndWorkout: {
+                        finishingSessionID = drill.session?.id
+                        showFinishWorkout = true
+                    }
+                )
+            } else {
+                unavailable("Drill")
+            }
         case .workoutSummary(let id):
-            if let session = session(for: id) { WorkoutSummaryView(session: session) { path = [] } } else { unavailable("Workout") }
+            if let session = session(for: id) {
+                WorkoutSummaryView(session: session) { path = [] }
+            } else {
+                unavailable("Workout")
+            }
         }
     }
 
-    private func unavailable(_ item: String) -> some View {
-        ContentUnavailableView("\(item) unavailable", systemImage: "exclamationmark.triangle")
-    }
+    private func routeInitialWorkoutIfNeeded() {
+        guard !didRouteInitialWorkout else { return }
+        didRouteInitialWorkout = true
+        guard let session = unfinishedSession else { return }
 
-    private func resumeOrStart() {
-        guard let session = unfinishedSession else {
-            path.append(.chooseZones)
+        if let drill = session.activeDrill {
+            path = [.activeDrill(drillID: drill.id, previousDrillID: nil)]
             return
         }
-        if let drill = session.activeDrill {
-            path.append(.activeDrill(drillID: drill.id))
-        } else if session.selectedZoneIDs.isEmpty {
-            path.append(.chooseZones)
-        } else {
-            path.append(.chooseFirstDrill(sessionID: session.id))
-        }
-    }
 
-    private func startDrill(in session: ShootingSession?, zoneID: Int) {
-        guard let session, session.selectedZoneIDs.contains(zoneID) else { return }
+        guard let zoneID = session.selectedZoneIDs.first else { return }
         let drill = session.resumableDrill(for: zoneID) ?? ShootingDrill(zoneID: zoneID, session: session)
         if drill.modelContext == nil {
             modelContext.insert(drill)
         }
         session.makeActive(drill)
         try? modelContext.save()
-        path.append(.activeDrill(drillID: drill.id))
+        path = [.activeDrill(drillID: drill.id, previousDrillID: nil)]
+    }
+
+    private func replaceActiveRoute(with target: ShootingDrill, previousDrill: ShootingDrill?) {
+        if !path.isEmpty {
+            path.removeLast()
+        }
+        path.append(.activeDrill(drillID: target.id, previousDrillID: previousDrill?.id))
+    }
+
+    private func unavailable(_ item: String) -> some View {
+        ContentUnavailableView("\(item) unavailable", systemImage: "exclamationmark.triangle")
     }
 
     private func session(for id: UUID?) -> ShootingSession? {
@@ -174,6 +227,7 @@ struct StatView: View {
         VStack(spacing: 3) {
             Text(value).font(.title3.bold().monospacedDigit())
             Text(label).font(.caption).foregroundStyle(.secondary)
-        }.frame(maxWidth: .infinity)
+        }
+        .frame(maxWidth: .infinity)
     }
 }

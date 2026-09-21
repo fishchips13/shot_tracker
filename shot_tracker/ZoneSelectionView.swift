@@ -6,13 +6,17 @@ struct ZoneSelectionView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var selectionZoneIDs: Set<Int> = []
     @State private var showLimitAlert = false
-    let onContinue: (ShootingSession) -> Void
+    @State private var showGoalOptions = false
+    @State private var goal = 0
+    let onStart: (ShootingDrill) -> Void
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 Text("Choose Your Zones").font(.largeTitle.bold())
-                Text("Choose one or two areas to train in this workout.").foregroundStyle(.secondary)
+                Text("Pick one or two spots. Start open, add a goal if you want one.")
+                    .foregroundStyle(.secondary)
+
                 CourtDiagramView(mode: .selection, selectedZoneIDs: selectionZoneIDs, activeZoneID: nil) { id in
                     if selectionZoneIDs.contains(id) {
                         selectionZoneIDs.remove(id)
@@ -22,18 +26,32 @@ struct ZoneSelectionView: View {
                         showLimitAlert = true
                     }
                 }
+
                 if !selectionZoneIDs.isEmpty {
                     FlowLayout(ids: selectionZoneIDs.sorted())
                 }
-                Button("Continue") {
-                    let session = ShootingSession(zoneIDs: selectionZoneIDs.sorted())
-                    session.statusRaw = SessionStatus.active.rawValue
-                    modelContext.insert(session)
-                    try? modelContext.save()
-                    onContinue(session)
+
+                DisclosureGroup("Attempt goal (optional)", isExpanded: $showGoalOptions) {
+                    Picker("Attempt goal", selection: $goal) {
+                        Text("Open shooting").tag(0)
+                        Text("25 attempts").tag(25)
+                        Text("50 attempts").tag(50)
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.top, 8)
+                }
+                .font(.subheadline.weight(.semibold))
+
+                Button {
+                    startShooting()
+                } label: {
+                    Label("Start Shooting", systemImage: "play.fill")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
                 }
                 .buttonStyle(.borderedProminent)
-                .frame(maxWidth: .infinity)
+                .controlSize(.large)
                 .disabled(selectionZoneIDs.isEmpty)
             }
             .padding()
@@ -48,16 +66,34 @@ struct ZoneSelectionView: View {
             Button("OK", role: .cancel) { }
         }
     }
+
+    private func startShooting() {
+        let zoneIDs = selectionZoneIDs.sorted()
+        guard let initialZoneID = zoneIDs.first else { return }
+        let session = ShootingSession(zoneIDs: zoneIDs)
+        session.statusRaw = SessionStatus.active.rawValue
+        let drill = ShootingDrill(
+            zoneID: initialZoneID,
+            session: session,
+            goalAttempts: goal == 0 ? nil : goal
+        )
+        modelContext.insert(session)
+        modelContext.insert(drill)
+        try? modelContext.save()
+        onStart(drill)
+    }
 }
 
 struct FlowLayout: View {
     let ids: [Int]
+
     var body: some View {
         HStack {
             ForEach(ids, id: \.self) { id in
-                Text(zone(for: id)?.name ?? "Zone")
+                Text(zone(for: id)?.shortName ?? "Zone")
                     .font(.subheadline.weight(.semibold))
-                    .padding(.horizontal, 10).padding(.vertical, 7)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
                     .background(.orange.opacity(0.15))
                     .clipShape(Capsule())
             }
